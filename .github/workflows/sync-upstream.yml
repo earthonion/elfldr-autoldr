@@ -1,13 +1,21 @@
-name: Sync upstream elfldr
+name: Sync upstream + build
 
 on:
   schedule:
     - cron: '0 6 * * *'
+  push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,21 +27,106 @@ jobs:
           git fetch upstream master
 
       - name: Merge upstream
+        id: merge
         run: |
           git config user.name "earthonion"
           git config user.email "earth@grr.llc"
           if git merge-base --is-ancestor upstream/master HEAD; then
             echo "Already up to date"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git merge upstream/master --no-edit -m "merge upstream elfldr"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Push to GitHub
+        if: steps.merge.outputs.changed == 'true'
         run: git push origin main
 
       - name: Push to Forgejo
+        if: steps.merge.outputs.changed == 'true'
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           git remote add forgejo https://earthonion:${FORGEJO_TOKEN}@git.etawen.dev/earthonion/elfldr-autoldr.git || true
           git push forgejo main
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [sync]
+    if: always() && (needs.sync.result == 'skipped' || needs.sync.result == 'success')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm clang lld
+
+      - name: Download PS5 SDK
+        run: |
+          curl -sL "$(gh api repos/ps5-payload-dev/sdk/releases/latest --jq '.assets[0].browser_download_url')" -o ps5-sdk.zip
+          unzip -q ps5-sdk.zip -d ps5-sdk
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build
+        run: make PS5_PAYLOAD_SDK=$PWD/ps5-sdk/ps5-payload-sdk
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          gh release create latest \
+            --title "Build ${{ steps.sha.outputs.short }}" \
+            --notes "Automated build from commit ${{ github.sha }}" \
+            elfldr-ps5.elf
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload to Forgejo release
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          API="https://git.etawen.dev/api/v1"
+          REPO="earthonion/elfldr-autoldr"
+          UA="elfldr-autoldr-ci"
+
+          # delete existing 'latest' release if any
+          rid=$(curl -sf -H "Authorization: token ${FORGEJO_TOKEN}" -H "User-Agent: ${UA}" \
+            "${API}/repos/${REPO}/releases/tags/latest" | jq -r '.id // empty') || true
+          if [ -n "$rid" ]; then
+            curl -sf -X DELETE -H "Authorization: token ${FORGEJO_TOKEN}" -H "User-Agent: ${UA}" \
+              "${API}/repos/${REPO}/releases/${rid}" || true
+            # delete the git tag too so we can recreate
+            curl -sf -X DELETE -H "Authorization: token ${FORGEJO_TOKEN}" -H "User-Agent: ${UA}" \
+              "${API}/repos/${REPO}/tags/latest" || true
+          fi
+
+          # create release
+          rid=$(curl -sf -X POST -H "Authorization: token ${FORGEJO_TOKEN}" -H "User-Agent: ${UA}" \
+            -H "Content-Type: application/json" \
+            -d '{"tag_name":"latest","name":"Build ${{ steps.sha.outputs.short }}","body":"Automated build from commit ${{ github.sha }}"}' \
+            "${API}/repos/${REPO}/releases" | jq -r '.id')
+
+          # upload asset
+          curl -sf -X POST -H "Authorization: token ${FORGEJO_TOKEN}" -H "User-Agent: ${UA}" \
+            -F "attachment=@elfldr-ps5.elf" \
+            "${API}/repos/${REPO}/releases/${rid}/assets?name=elfldr-ps5.elf"
+
+      - name: Deploy to sony-dns
+        env:
+          SONY_DNS_KEY: ${{ secrets.SONY_DNS_KEY }}
+        if: env.SONY_DNS_KEY != ''
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SONY_DNS_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H 45.56.67.85 >> ~/.ssh/known_hosts 2>/dev/null
+          scp -i ~/.ssh/id_deploy elfldr-ps5.elf root@45.56.67.85:/root/autoldr/src/ps5/elfldr.elf
+          ssh -i ~/.ssh/id_deploy root@45.56.67.85 "chmod o+r /root/autoldr/src/ps5/elfldr.elf"
