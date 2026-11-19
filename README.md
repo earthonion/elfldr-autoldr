@@ -1,61 +1,48 @@
-# ps5-payload-elfldr
-This is an ELF loader for PS5 systems that have been jailbroken using either the
-[BD-J ps5-payload-loader][bdj], or the [webkit approached from Specter][webkit].
-Unlike the ELF loaders bundled with those exploits, this one uses the ptrace
-syscall to bootstrap itself into the `SceRedisServer` process, and then launches
-itself into a new process that keeps running in the background, even when
-playing games. Furthermore, this ELF loader will also resume its execution when
-the PS5 returns from rest mode. Since payloads are executed in induvidual
-processes, this ELF loader keeps on running even if a payload crashes.
+# elfldr-autoldr
 
-## Quick-start
-To deploy ps5-payload-elfldr, first launch a kernel exploit that provides
-a rudimentary ELF loader on port 9020, e.g., [BD-J ps5-payload-loader][bdj],
-or the [webkit approached from Specter][webkit]. Then, run the following:
-```console
-john@localhost:~$ export PS5_HOST=ps5
-john@localhost:~$ export PS5_PORT=9020
-john@localhost:~$ wget -q -O - https://github.com/ps5-payload-dev/elfldr/releases/latest/download/elfldr-ps5.elf | nc -q0 $PS5_HOST $PS5_PORT
-```
+PS5 elfldr with an `autoldr` extension. Fork of [ps5-payload-dev/elfldr](https://github.com/ps5-payload-dev/elfldr).
 
-## Usage examples
-```console
-john@localhost:~$ export PS5_HOST=ps5
-john@localhost:~$ export PS5_PORT=9021
-john@localhost:~$ export PS5_PAYLOAD=payload.elf # from local storage
-john@localhost:~$ nc -q0 $PS5_HOST $PS5_PORT < $PS5_PAYLOAD
-john@localhost:~$
-john@localhost:~$ export PS5_PAYLOAD=file:/data/payload.elf # from console storage
-john@localhost:~$ echo "$PS5_PAYLOAD" | nc -q0 $PS5_HOST $PS5_PORT
-john@localhost:~$
-john@localhost:~$ export PS5_PAYLOAD=https://github.com/ps5-payload-dev/ftpsrv/releases/latest/download/ftpsrv-ps5.elf
-john@localhost:~$ echo "$PS5_PAYLOAD" | nc -q0 $PS5_HOST $PS5_PORT
-john@localhost:~$
-john@localhost:~$ export PS5_PAYLOAD=https://github.com/ps5-payload-dev/ftpsrv/releases/latest/download/ftpsrv-ps5.elf
-john@localhost:~$ curl "http://$PS5_HOST:$PS5_PORT?uri=$PS5_PAYLOAD"
-```
+## What is this
+
+`elfldr-ps5.elf` is the post-exploit ELF loader that PS5 jailbreak chains hand control to once they have kernel R/W. It listens on TCP 9020 (control) / 9021 (payload) and runs whatever ELF you send it.
+
+This fork bundles two extras:
+
+- **`autoldr.elf`** — chains off elfldr and automatically loads any `.elf` it finds in well-known paths (`/mnt/usb0..7/`, `/data/`, `/mnt/usbN/ps5_autoloader/`, `/data/ps5_autoloader/`). Drop your payload on a USB stick, plug it in, run elfldr — no `nc`/`socat` needed.
+- An updated `Makefile` that builds everything in one shot and produces a single `elfldr-ps5.elf` artifact.
+
+## Usage
+
+It's as simple as **replacing `elfldr.elf` (or `elfldr-ps5.elf`) in your favorite exploit** with the build from [releases](https://git.etawen.dev/earthonion/elfldr-autoldr/releases).
+
+| Exploit chain | File to replace |
+|---|---|
+| Netflix-N-Hack | `payloads/elfldr-ps5.elf` |
+| Y2JB | `splash_screen/aHR0cHM6...vdHY=/elfldr-ps5-1340.elf` |
+
+> ⚠️ **Bump the download buffer.** The autoldr build is bigger than stock elfldr — current release is **~520 KB** (vs ~360 KB upstream). Most exploit chains pre-allocate a fixed buffer to fetch the ELF into; if that buffer is smaller than the new file, fetch silently truncates and the loader crashes on entry. Grep your chain for the elfldr `malloc(...)` / `fetch_file(..., SIZE)` call and bump it to at least `1 * 1024 * 1024` (1 MB) to give headroom for future builds.
+>
+> Known spots:
+> - Netflix-N-Hack `payloads/elf_loader.js` — `malloc(...)` + `fetch_file(..., SIZE)` near the top
+> - Netflix-N-Hack `payloads/p2jb.js` — same pattern
+> - Y2JB `splash_screen/.../elf_loader.js` — same pattern
 
 ## Building
-Assuming you have the [ps5-payload-sdk][sdk] installed on a Debian-flavored
-operating system, ps5-payload-elfldr can be compiled using the following
-set of commands:
 
-```console
-john@localhost:ps5-payload-elfldr$ sudo apt-get install xxd
-john@localhost:ps5-payload-elfldr$ export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
-john@localhost:ps5-payload-elfldr$ make
+```
+git clone https://git.etawen.dev/earthonion/elfldr-autoldr
+cd elfldr-autoldr
+export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk    # https://github.com/ps5-payload-dev/sdk
+make
+# -> elfldr-ps5.elf
 ```
 
-## Reporting Bugs
-If you encounter problems with ps5-payload-elfldr, please [file a github issue][issues].
-If you plan on sending pull requests which affect more than a few lines of code,
-please file an issue before you start to work on you changes. This will allow us
-to discuss the solution properly before you commit time and effort.
+## Credits
+
+- [John Törnblom](https://github.com/john-tornblom) — original elfldr
+- [ps5-payload-dev](https://github.com/ps5-payload-dev) — upstream fork + payload SDK
+- `autoldr` extension by earthonion
 
 ## License
-ps5-payload-elfldr is licensed under the GPLv3+.
 
-[bdj]: https://github.com/john-tornblom/bdj-sdk/tree/master/samples/ps5-payload-loader
-[sdk]: https://github.com/ps5-payload-dev/sdk
-[webkit]: https://github.com/Cryptogenic/PS5-IPV6-Kernel-Exploit
-[issues]: https://github.com/ps5-payload-dev/elfldr/issues/new
+GPL-3.0 (same as upstream).

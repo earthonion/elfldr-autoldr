@@ -14,6 +14,8 @@
 # along with this program; see the file COPYING. If not see
 # <http://www.gnu.org/licenses/>.
 
+#	curl -sL $$(curl -s https://api.github.com/repos/itsPLK/ps5-unified-autoloader/releases/latest | grep browser_download_url | cut -d '"' -f 4) -o $@
+
 PS5_HOST ?= ps5
 PS5_PORT ?= 9020
 
@@ -28,25 +30,44 @@ LDADD  := -lSceSsl -lSceHttp
 
 all: elfldr-ps5.elf
 
-bootstrap.o: socksrv.elf
-main.o: bootstrap.elf
+socksrv_elf.c: socksrv.elf
+bootstrap_elf.c: bootstrap.elf
+
+bootstrap.o: socksrv_elf.c autoldr_elf.c
+autoldr.o: autoldr.c
+main.o: bootstrap_elf.c
 
 bootstrap.elf: bootstrap.o elfldr.o pt.o notify.o
 	$(CC) -o $@ $^
 	$(STRIP) $@
 
+bootstrap_elf.c: bootstrap.elf
+	xxd -i $^ > $@
+
 socksrv.elf: socksrv.o selfldr.o elfldr.o pt.o notify.o uri.o
 	$(CC) -o $@ $^ $(LDADD)
 	$(STRIP) $@
+
+socksrv_elf.c: socksrv.elf
+	xxd -i $^ > $@
+
+autoldr.elf: autoldr.o elfldr.o pt.o notify.o
+	$(CC) -o $@ $^
+	$(STRIP) $@
+
+
+autoldr_elf.c: autoldr.elf
+	xxd -i $^ > $@
+
 
 elfldr-ps5.elf: main.o elfldr.o pt.o notify.o
 	$(CC) -o $@ $^
 	$(STRIP) $@
 
 clean:
-	rm -f *.o *.elf
+	rm -f bootstrap_elf.c socksrv_elf.c autoldr_elf.c *.o *.elf
 
 test: elfldr-ps5.elf
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
 
-.INTERMEDIATE: socksrv.elf bootstrap.elf
+.INTERMEDIATE: socksrv_elf.c socksrv.elf bootstrap_elf.c bootstrap.elf autoldr_elf.c autoldr.elf

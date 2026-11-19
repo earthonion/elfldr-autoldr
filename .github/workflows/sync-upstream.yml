@@ -1,0 +1,39 @@
+name: Sync upstream elfldr
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/ps5-payload-dev/elfldr.git || true
+          git fetch upstream master
+
+      - name: Merge upstream
+        run: |
+          git config user.name "earthonion"
+          git config user.email "earth@grr.llc"
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "Already up to date"
+            exit 0
+          fi
+          git merge upstream/master --no-edit -m "merge upstream elfldr"
+
+      - name: Push to GitHub
+        run: git push origin main
+
+      - name: Push to Forgejo
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          git remote add forgejo https://earthonion:${FORGEJO_TOKEN}@git.etawen.dev/earthonion/elfldr-autoldr.git || true
+          git push forgejo main
