@@ -46,6 +46,8 @@ along with this program; see the file COPYING. If not, see
 #define PAYLOAD_MAGIC_PS4_SELF 0x1D3D154F // PS4 SELF payload
 #define PAYLOAD_MAGIC_PS5_SELF 0xEEF51454 // PS5 SELF payload
 #define PAYLOAD_MAGIC_HTTP_GET 0x20544547 // HTTP GET request
+#define PAYLOAD_MAGIC_HTTP_OPT 0x4954504F // OPTIONS (CORS preflight)
+#define PAYLOAD_MAGIC_HTTP_POST 0x54534F50 // POST request
 
 
 /**
@@ -180,6 +182,91 @@ payload_readuri(int fd, char* uri, size_t size) {
 
 
 /**
+ * Respond to a CORS preflight (OPTIONS) request.
+ **/
+static int
+payload_preflight(int fd) {
+  const char *resp = ("HTTP/1.1 204 No Content\r\n"
+		      "Access-Control-Allow-Origin: *\r\n"
+		      "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+		      "Access-Control-Allow-Headers: Content-Type\r\n"
+		      "Access-Control-Allow-Private-Network: true\r\n"
+		      "Access-Control-Max-Age: 86400\r\n"
+		      "Connection: close\r\n"
+		      "\r\n");
+  char buf[2048];
+  read(fd, buf, sizeof(buf)-1);
+  write(fd, resp, strlen(resp));
+  return 0;
+}
+
+
+/**
+ * Read a HTTP (POST) request — receive raw ELF in body.
+ **/
+static int
+payload_readpost(int fd, uint8_t **out, size_t *out_len) {
+  const char *ok = ("HTTP/1.1 200 OK\r\n"
+		    "Access-Control-Allow-Origin: *\r\n"
+		    "Access-Control-Allow-Private-Network: true\r\n"
+		    "Content-Length: 2\r\n"
+		    "Connection: close\r\n"
+		    "\r\n"
+		    "ok");
+  const char *err = ("HTTP/1.1 400 Bad Request\r\n"
+		     "Access-Control-Allow-Origin: *\r\n"
+		     "Connection: close\r\n"
+		     "\r\n");
+  char hdr[4096];
+  ssize_t n;
+  size_t content_length = 0;
+  char *cl;
+  char *body_start;
+  size_t hdr_read = 0;
+
+  // read headers
+  while(hdr_read < sizeof(hdr)-1) {
+    if((n = read(fd, hdr + hdr_read, 1)) <= 0) {
+      write(fd, err, strlen(err));
+      return -1;
+    }
+    hdr_read++;
+    hdr[hdr_read] = 0;
+    if(hdr_read >= 4 && !memcmp(hdr + hdr_read - 4, "\r\n\r\n", 4))
+      break;
+  }
+
+  if(!(cl = strcasestr(hdr, "content-length:"))) {
+    write(fd, err, strlen(err));
+    return -1;
+  }
+  content_length = (size_t)atol(cl + 15);
+  if(content_length == 0 || content_length > 16*1024*1024) {
+    write(fd, err, strlen(err));
+    return -1;
+  }
+
+  uint8_t *buf = malloc(content_length);
+  if(!buf) {
+    write(fd, err, strlen(err));
+    return -1;
+  }
+
+  size_t total = 0;
+  while(total < content_length) {
+    n = read(fd, buf + total, content_length - total);
+    if(n <= 0) { free(buf); write(fd, err, strlen(err)); return -1; }
+    total += n;
+  }
+
+  write(fd, ok, strlen(ok));
+  *out = buf;
+  *out_len = total;
+  return 0;
+}
+
+
+/**
  * Read a HTTP (GET) request.
  **/
 static int
@@ -187,6 +274,7 @@ payload_readhttp(int fd, char* uri, size_t size) {
   const char *headers = ("HTTP/1.1 200 OK\r\n"
 			 "Content-Type: text/plain; charset=utf-8\r\n"
 			 "Access-Control-Allow-Origin: *\r\n"
+			 "Access-Control-Allow-Private-Network: true\r\n"
 			 "Connection: close\r\n"
 			 "\r\n");
   char buf[PATH_MAX+255] = {0};
@@ -250,7 +338,16 @@ on_connection(int fd) {
     return;
   }
 
-  if(magic == PAYLOAD_MAGIC_URI_FILE || magic == PAYLOAD_MAGIC_URI_HTTP) {
+  if(magic == PAYLOAD_MAGIC_HTTP_OPT) {
+    payload_preflight(fd);
+    return;
+
+  } else if(magic == PAYLOAD_MAGIC_HTTP_POST) {
+    if(payload_readpost(fd, &buf, &len)) {
+      LOG_PERROR("payload_readpost");
+    }
+
+  } else if(magic == PAYLOAD_MAGIC_URI_FILE || magic == PAYLOAD_MAGIC_URI_HTTP) {
     if(payload_readuri(fd, uri, PATH_MAX) || uri_get_content(uri, &buf, &len)) {
       LOG_PERROR("payload_readuri");
       write(fd, "[elfldr.elf] Error reading URI payload\n\r\0", 41);
