@@ -19,8 +19,10 @@ along with this program; see the file COPYING. If not, see
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -400,6 +402,76 @@ notify_address(const char* prefix, int port) {
 /**
  *
  **/
+static const char *autoldr_paths[] = {
+  "/mnt/usb0/", "/mnt/usb1/", "/mnt/usb2/", "/mnt/usb3/",
+  "/mnt/usb4/", "/mnt/usb5/", "/mnt/usb6/", "/mnt/usb7/",
+  "/data/",
+  "/mnt/usb0/ps5_autoloader/", "/mnt/usb1/ps5_autoloader/",
+  "/mnt/usb2/ps5_autoloader/", "/mnt/usb3/ps5_autoloader/",
+  "/mnt/usb4/ps5_autoloader/", "/mnt/usb5/ps5_autoloader/",
+  "/mnt/usb6/ps5_autoloader/", "/mnt/usb7/ps5_autoloader/",
+  "/data/ps5_autoloader/",
+  NULL
+};
+
+static int
+autoldr_spawn_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if(!f) return -1;
+
+  fseek(f, 0, SEEK_END);
+  size_t size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  uint8_t *buf = malloc(size);
+  if(!buf) { fclose(f); return -1; }
+
+  if(fread(buf, 1, size, f) != size) { free(buf); fclose(f); return -1; }
+  fclose(f);
+
+  if(elfldr_sanity_check(buf, size)) { free(buf); return -1; }
+
+  char *const argv[] = {(char*)path, 0};
+  pid_t pid = elfldr_spawn(-1, argv, buf, size);
+  free(buf);
+  return pid < 0 ? -1 : 0;
+}
+
+static void
+autoldr_run(void) {
+  for(int i = 0; autoldr_paths[i]; i++) {
+    char filepath[256], line[256];
+    snprintf(filepath, sizeof(filepath), "%sautoload.txt", autoldr_paths[i]);
+
+    FILE *f = fopen(filepath, "r");
+    if(!f) continue;
+
+    LOG_PRINTF("autoldr: found %s\n", filepath);
+    notify("autoldr: loading from %s", autoldr_paths[i]);
+
+    while(fgets(line, sizeof(line), f)) {
+      line[strcspn(line, "\r\n")] = 0;
+      if(line[0] == '\0') continue;
+
+      if(line[0] == '!') {
+        int ms = atoi(line + 1);
+        if(ms > 0) usleep(ms * 1000);
+        continue;
+      }
+
+      char elfpath[256];
+      snprintf(elfpath, sizeof(elfpath), "%s%s", autoldr_paths[i], line);
+      LOG_PRINTF("autoldr: spawning %s\n", elfpath);
+      notify("autoldr: spawning %s", line);
+
+      if(autoldr_spawn_file(elfpath))
+        notify("autoldr: failed to spawn %s", line);
+    }
+    fclose(f);
+    break;
+  }
+}
+
 int main() {
   int port = 9021;
   pid_t pid;
@@ -423,6 +495,8 @@ int main() {
   syscall(SYS_thr_set_name, -1, "elfldr.elf");
   signal(SIGCHLD, SIG_IGN);
   signal(SIGPIPE, SIG_IGN);
+
+  autoldr_run();
 
   notify_address("Serving ELF loader on", port);
   while(1) {
